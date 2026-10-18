@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.env
+service-account-key.json
+uploads/*
+!uploads/.gitkeep
+.git
+.gitignore
+README.md
+test
+coverage
+.DS_Store
