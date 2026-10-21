@@ -77,9 +77,7 @@ export async function uploadMultipleFiles(request, reply) {
 
       const isAllowed = isMimeTypeAllowed(part.mimetype, part.filename);
       if (!isAllowed) {
-        return reply.forbidden(
-          `File type not allowed: ${part.mimetype} for ${part.filename}`,
-        );
+        return reply.forbidden(`File type not allowed: ${part.mimetype} for ${part.filename}`);
       }
 
       const result = await uploadFileToGCS(part);
@@ -129,10 +127,7 @@ export async function uploadToDisk(request, reply) {
       return reply.forbidden(`File type not allowed: ${data.mimetype}`);
     }
 
-    const finalPath = path.join(
-      path.resolve(config.upload.uploadDir),
-      data.filename,
-    );
+    const finalPath = path.join(path.resolve(config.upload.uploadDir), data.filename);
     await fs.rename(data.filepath, finalPath);
 
     return reply.code(201).send({

@@ -28,16 +28,19 @@ A comprehensive Fastify application for uploading files to Google Cloud Storage 
 ## Installation
 
 1. Clone the repository and navigate to the project directory:
+
 ```bash
 cd docker-gcp
 ```
 
 2. Install dependencies:
+
 ```bash
 npm install
 ```
 
 3. Configure environment variables:
+
 ```bash
 cp .env.example .env
 ```
@@ -49,18 +52,21 @@ cp .env.example .env
 The application supports multiple authentication methods for GCS:
 
 ### Method 1: Service Account Key File (Recommended for local dev)
+
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS=./service-account-key.json
 GCS_BUCKET_NAME=your-bucket-name
 ```
 
 ### Method 2: Base64 Encoded Service Account Key (Recommended for containers)
+
 ```bash
 GOOGLE_APPLICATION_CREDENTIALS_BASE64=eyJ0eXBlIjoic2VydmljZV9hY2NvdW50Ii4uLg==
 GCS_BUCKET_NAME=your-bucket-name
 ```
 
 ### Method 3: Application Default Credentials (GCP environments like GCE, Cloud Run, GKE)
+
 Leave the credential variables empty and ensure ADC is configured. This is automatic in GCP environments.
 
 ## Google Cloud Setup
@@ -75,28 +81,31 @@ Leave the credential variables empty and ensure ADC is configured. This is autom
 ### Start the server
 
 Development mode (with auto-reload):
+
 ```bash
 npm run dev
 ```
 
 Production mode:
+
 ```bash
 npm start
 ```
 
 ### API Endpoints
 
-| Method | Endpoint | Description | Content-Type |
-|---|---|---|---|
-| GET | `/health` | Health check | application/json |
-| POST | `/upload` | Upload single file to GCS | multipart/form-data |
-| POST | `/upload/multiple` | Upload multiple files to GCS | multipart/form-data |
-| POST | `/upload/disk` | Upload to local disk (testing) | multipart/form-data |
-| DELETE | `/upload/:filename` | Delete file from GCS | application/json |
+| Method | Endpoint            | Description                    | Content-Type        |
+| ------ | ------------------- | ------------------------------ | ------------------- |
+| GET    | `/health`           | Health check                   | application/json    |
+| POST   | `/upload`           | Upload single file to GCS      | multipart/form-data |
+| POST   | `/upload/multiple`  | Upload multiple files to GCS   | multipart/form-data |
+| POST   | `/upload/disk`      | Upload to local disk (testing) | multipart/form-data |
+| DELETE | `/upload/:filename` | Delete file from GCS           | application/json    |
 
 ### Example: Single File Upload
 
 Using cURL:
+
 ```bash
 curl -X POST \
   http://localhost:3000/upload \
@@ -104,6 +113,7 @@ curl -X POST \
 ```
 
 Response:
+
 ```json
 {
   "success": true,
@@ -141,19 +151,39 @@ curl -X DELETE http://localhost:3000/upload/1234567890-image.jpg
 
 ## Testing
 
-Run tests:
 ```bash
 npm test
 ```
 
+## Code quality
+
+Formatting and linting are separate concerns:
+
+- **Prettier** owns formatting. Configuration lives in `.prettierrc.json`, so the
+  editor extension and CLI produce the same output.
+- **ESLint** checks correctness only. `eslint-config-prettier` disables all formatting
+  rules, so ESLint and Prettier never disagree.
+
+```bash
+npm run lint          # correctness checks
+npm run lint:fix      # auto-fix safe issues
+npm run format        # format the codebase
+npm run format:check  # verify formatting (used in CI)
+```
+
+The formatting rules are intentionally not lint errors. Semicolons, quotes, spacing,
+and line wrapping are handled by Prettier.
+
 ## Docker
 
 Build the image:
+
 ```bash
 docker build -t fastify-gcs-upload .
 ```
 
 Run the container:
+
 ```bash
 docker run -p 8080:8080 \
   -e GCS_BUCKET_NAME=your-bucket-name \
@@ -168,10 +198,10 @@ The image is a multi-stage build that runs as the non-root `node` user and liste
 
 Two GitHub Actions workflows are included:
 
-| Workflow | File | Trigger | Purpose |
-|---|---|---|---|
-| CI | `.github/workflows/ci.yml` | Pull requests to `main` (and called by the deploy workflow) | Installs dependencies, runs lint and tests, validates the Docker build |
-| Deploy | `.github/workflows/deploy.yml` | Pushes to `main`, manual dispatch | Runs CI, builds and pushes the image to Artifact Registry, deploys to Cloud Run |
+| Workflow | File                           | Trigger                                                     | Purpose                                                                         |
+| -------- | ------------------------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| CI       | `.github/workflows/ci.yml`     | Pull requests to `main` (and called by the deploy workflow) | Installs dependencies, runs lint and tests, validates the Docker build          |
+| Deploy   | `.github/workflows/deploy.yml` | Pushes to `main`, manual dispatch                           | Runs CI, builds and pushes the image to Artifact Registry, deploys to Cloud Run |
 
 The deploy workflow authenticates with **Workload Identity Federation (WIF)**. No
 long-lived service account keys are stored in GitHub.
@@ -308,32 +338,32 @@ gcloud iam workload-identity-pools providers describe "${PROVIDER}" \
 
 Create these **secrets** (`Settings → Secrets and variables → Actions → Secrets`):
 
-| Secret | Description |
-|---|---|
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full provider resource name from step 5 |
-| `GCP_DEPLOY_SERVICE_ACCOUNT` | Deployer service account email (`github-deployer@...`) |
+| Secret                           | Description                                            |
+| -------------------------------- | ------------------------------------------------------ |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full provider resource name from step 5                |
+| `GCP_DEPLOY_SERVICE_ACCOUNT`     | Deployer service account email (`github-deployer@...`) |
 
 Create these **variables** (`Settings → Secrets and variables → Actions → Variables`):
 
-| Variable | Required | Description |
-|---|---|---|
-| `GCP_PROJECT_ID` | Yes | Google Cloud project ID |
-| `GCP_REGION` | Yes | Cloud Run region, e.g. `us-central1` |
-| `ARTIFACT_REGISTRY_REPO` | Yes | Name of the **existing** Artifact Registry repository |
-| `CLOUD_RUN_SERVICE` | Yes | Name of the **existing** Cloud Run service |
-| `GCS_BUCKET_NAME` | Yes | Bucket where uploads are stored |
-| `ARTIFACT_REGISTRY_REGION` | No | Registry region if different from `GCP_REGION` (defaults to `GCP_REGION`) |
-| `ARTIFACT_REGISTRY_IMAGE` | No | Image name inside the repository if different from `CLOUD_RUN_SERVICE` (defaults to `CLOUD_RUN_SERVICE`) |
-| `CLOUD_RUN_SERVICE_ACCOUNT` | No | Runtime service account email. If unset, the existing service identity is preserved |
-| `RUN_ALLOW_UNAUTHENTICATED` | No | `true`/`false` to force public access; leave unset to preserve the existing setting |
-| `MAX_FILE_SIZE_BYTES` | No | Upload size limit (defaults to the app default, `52428800`) |
-| `ALLOWED_MIME_TYPES` | No | Comma-separated MIME patterns (defaults to the app default) |
-| `CLOUD_RUN_MEMORY` | No | Override memory (e.g. `512Mi`); unset preserves the existing setting |
-| `CLOUD_RUN_CPU` | No | Override CPU; unset preserves the existing setting |
-| `CLOUD_RUN_MIN_INSTANCES` | No | Override min instances; unset preserves the existing setting |
-| `CLOUD_RUN_MAX_INSTANCES` | No | Override max instances; unset preserves the existing setting |
-| `CLOUD_RUN_TIMEOUT` | No | Override request timeout in seconds; unset preserves the existing setting |
-| `CLOUD_RUN_PORT` | No | Override container port; unset preserves the existing setting |
+| Variable                    | Required | Description                                                                                              |
+| --------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `GCP_PROJECT_ID`            | Yes      | Google Cloud project ID                                                                                  |
+| `GCP_REGION`                | Yes      | Cloud Run region, e.g. `us-central1`                                                                     |
+| `ARTIFACT_REGISTRY_REPO`    | Yes      | Name of the **existing** Artifact Registry repository                                                    |
+| `CLOUD_RUN_SERVICE`         | Yes      | Name of the **existing** Cloud Run service                                                               |
+| `GCS_BUCKET_NAME`           | Yes      | Bucket where uploads are stored                                                                          |
+| `ARTIFACT_REGISTRY_REGION`  | No       | Registry region if different from `GCP_REGION` (defaults to `GCP_REGION`)                                |
+| `ARTIFACT_REGISTRY_IMAGE`   | No       | Image name inside the repository if different from `CLOUD_RUN_SERVICE` (defaults to `CLOUD_RUN_SERVICE`) |
+| `CLOUD_RUN_SERVICE_ACCOUNT` | No       | Runtime service account email. If unset, the existing service identity is preserved                      |
+| `RUN_ALLOW_UNAUTHENTICATED` | No       | `true`/`false` to force public access; leave unset to preserve the existing setting                      |
+| `MAX_FILE_SIZE_BYTES`       | No       | Upload size limit (defaults to the app default, `52428800`)                                              |
+| `ALLOWED_MIME_TYPES`        | No       | Comma-separated MIME patterns (defaults to the app default)                                              |
+| `CLOUD_RUN_MEMORY`          | No       | Override memory (e.g. `512Mi`); unset preserves the existing setting                                     |
+| `CLOUD_RUN_CPU`             | No       | Override CPU; unset preserves the existing setting                                                       |
+| `CLOUD_RUN_MIN_INSTANCES`   | No       | Override min instances; unset preserves the existing setting                                             |
+| `CLOUD_RUN_MAX_INSTANCES`   | No       | Override max instances; unset preserves the existing setting                                             |
+| `CLOUD_RUN_TIMEOUT`         | No       | Override request timeout in seconds; unset preserves the existing setting                                |
+| `CLOUD_RUN_PORT`            | No       | Override container port; unset preserves the existing setting                                            |
 
 ### 7. Deploy
 
