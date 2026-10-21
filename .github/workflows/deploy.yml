@@ -1,0 +1,188 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Existing Artifact Registry image tag to deploy (skips build)
+        required: false
+        type: string
+
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  ARTIFACT_REPO: ${{ vars.ARTIFACT_REGISTRY_REPO }}
+  ARTIFACT_REGISTRY_HOST: ${{ vars.ARTIFACT_REGISTRY_REGION || vars.GCP_REGION }}-docker.pkg.dev
+  SERVICE_NAME: ${{ vars.CLOUD_RUN_SERVICE }}
+  IMAGE_URI: ${{ vars.ARTIFACT_REGISTRY_REGION || vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ vars.ARTIFACT_REGISTRY_REPO }}/${{ vars.ARTIFACT_REGISTRY_IMAGE || vars.CLOUD_RUN_SERVICE }}:${{ github.event.inputs.image_tag || github.sha }}
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    with:
+      skip_docker_build: true
+
+  build-and-push:
+    name: Build and push image
+    needs: ci
+    if: ${{ !github.event.inputs.image_tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          token_format: access_token
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Artifact Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ARTIFACT_REGISTRY_HOST }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE_URI }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Cloud Run
+    needs: [ci, build-and-push]
+    if: >-
+      always() &&
+      needs.ci.result == 'success' &&
+      (needs.build-and-push.result == 'success' || needs.build-and-push.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CLOUD_RUN_SERVICE_ACCOUNT: ${{ vars.CLOUD_RUN_SERVICE_ACCOUNT }}
+      GCS_BUCKET_NAME: ${{ vars.GCS_BUCKET_NAME }}
+      MAX_FILE_SIZE_BYTES: ${{ vars.MAX_FILE_SIZE_BYTES }}
+      ALLOWED_MIME_TYPES: ${{ vars.ALLOWED_MIME_TYPES }}
+      CLOUD_RUN_MEMORY: ${{ vars.CLOUD_RUN_MEMORY }}
+      CLOUD_RUN_CPU: ${{ vars.CLOUD_RUN_CPU }}
+      CLOUD_RUN_MIN_INSTANCES: ${{ vars.CLOUD_RUN_MIN_INSTANCES }}
+      CLOUD_RUN_MAX_INSTANCES: ${{ vars.CLOUD_RUN_MAX_INSTANCES }}
+      CLOUD_RUN_TIMEOUT: ${{ vars.CLOUD_RUN_TIMEOUT }}
+      CLOUD_RUN_PORT: ${{ vars.CLOUD_RUN_PORT }}
+      RUN_ALLOW_UNAUTHENTICATED: ${{ vars.RUN_ALLOW_UNAUTHENTICATED }}
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Deploy
+        id: deploy
+        run: |
+          set -euo pipefail
+
+          for var in GCP_PROJECT_ID GCP_REGION SERVICE_NAME ARTIFACT_REPO IMAGE_URI GCS_BUCKET_NAME; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::${var} is not configured. See README.md for the required repository variables."
+              exit 1
+            fi
+          done
+
+          ENV_VARS="NODE_ENV=production@GCS_PROJECT_ID=${GCP_PROJECT_ID}@GCS_BUCKET_NAME=${GCS_BUCKET_NAME}"
+          if [ -n "${MAX_FILE_SIZE_BYTES}" ]; then
+            ENV_VARS="${ENV_VARS}@MAX_FILE_SIZE_BYTES=${MAX_FILE_SIZE_BYTES}"
+          fi
+          if [ -n "${ALLOWED_MIME_TYPES}" ]; then
+            ENV_VARS="${ENV_VARS}@ALLOWED_MIME_TYPES=${ALLOWED_MIME_TYPES}"
+          fi
+
+          # --update-env-vars updates only the listed keys and preserves any
+          # other environment variables already configured on the service.
+          ARGS=(
+            run deploy "${SERVICE_NAME}"
+            --image="${IMAGE_URI}"
+            --region="${GCP_REGION}"
+            --project="${GCP_PROJECT_ID}"
+            --update-env-vars="^@^${ENV_VARS}"
+          )
+
+          if [ -n "${CLOUD_RUN_SERVICE_ACCOUNT}" ]; then
+            ARGS+=(--service-account="${CLOUD_RUN_SERVICE_ACCOUNT}")
+          fi
+          if [ -n "${CLOUD_RUN_MEMORY}" ]; then
+            ARGS+=(--memory="${CLOUD_RUN_MEMORY}")
+          fi
+          if [ -n "${CLOUD_RUN_CPU}" ]; then
+            ARGS+=(--cpu="${CLOUD_RUN_CPU}")
+          fi
+          if [ -n "${CLOUD_RUN_MIN_INSTANCES}" ]; then
+            ARGS+=(--min-instances="${CLOUD_RUN_MIN_INSTANCES}")
+          fi
+          if [ -n "${CLOUD_RUN_MAX_INSTANCES}" ]; then
+            ARGS+=(--max-instances="${CLOUD_RUN_MAX_INSTANCES}")
+          fi
+          if [ -n "${CLOUD_RUN_TIMEOUT}" ]; then
+            ARGS+=(--timeout="${CLOUD_RUN_TIMEOUT}")
+          fi
+          if [ -n "${CLOUD_RUN_PORT}" ]; then
+            ARGS+=(--port="${CLOUD_RUN_PORT}")
+          fi
+
+          # Unset preserves the existing service setting. Set to "true" or
+          # "false" to explicitly change public access.
+          if [ "${RUN_ALLOW_UNAUTHENTICATED}" = "true" ]; then
+            ARGS+=(--allow-unauthenticated)
+          elif [ "${RUN_ALLOW_UNAUTHENTICATED}" = "false" ]; then
+            ARGS+=(--no-allow-unauthenticated)
+          fi
+
+          gcloud "${ARGS[@]}" --quiet
+
+          SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" \
+            --region="${GCP_REGION}" \
+            --project="${GCP_PROJECT_ID}" \
+            --format='value(status.url)')"
+
+          echo "service_url=${SERVICE_URL}" >> "${GITHUB_OUTPUT}"
+          echo "Deployed ${SERVICE_NAME} -> ${SERVICE_URL}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Cloud Run deployment"
+            echo ""
+            echo "- **Service:** ${SERVICE_NAME}"
+            echo "- **Region:** ${GCP_REGION}"
+            echo "- **Image:** ${IMAGE_URI}"
+            echo "- **URL:** ${{ steps.deploy.outputs.service_url }}"
+          } >> "${GITHUB_STEP_SUMMARY}"

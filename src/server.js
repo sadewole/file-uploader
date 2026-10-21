@@ -54,6 +54,17 @@ async function healthCheckBucket () {
   }
 }
 
+async function shutdown (signal) {
+  fastify.log.info(`Received ${signal}, shutting down gracefully`)
+  try {
+    await fastify.close()
+    process.exit(0)
+  } catch (error) {
+    fastify.log.error(error, 'Error during shutdown')
+    process.exit(1)
+  }
+}
+
 async function start () {
   try {
     await registerPlugins()
@@ -71,5 +82,8 @@ async function start () {
     process.exit(1)
   }
 }
+
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 start()

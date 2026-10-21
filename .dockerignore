@@ -1,10 +1,12 @@
 node_modules
 npm-debug.log
 .env
+.env.*
 service-account-key.json
 uploads/*
 !uploads/.gitkeep
 .git
+.github
 .gitignore
 README.md
 test
