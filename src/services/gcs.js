@@ -16,15 +16,13 @@ export async function uploadFileToGCS (file, destination) {
 
   const writeStream = gcsFile.createWriteStream({
     resumable: false,
-    contentType: file.mimetype,
-    predefinedAcl: 'publicRead'
+    contentType: file.mimetype
   })
 
   const uploadPromise = new Promise((resolve, reject) => {
     writeStream.on('error', reject)
     writeStream.on('finish', async () => {
       try {
-        await gcsFile.makePublic()
         const [metadata] = await gcsFile.getMetadata()
         resolve({
           success: true,
@@ -54,8 +52,6 @@ export async function uploadFileFromDisk (filePath, destination, options = {}) {
     resumable: false,
     ...options
   })
-  const gcsFile = bucket.file(fileName)
-  await gcsFile.makePublic()
   return {
     success: true,
     fileName,
