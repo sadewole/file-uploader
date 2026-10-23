@@ -2,51 +2,6 @@
 
 A comprehensive Fastify application for uploading files to Google Cloud Storage (GCS) with support for multiple upload methods, validation, and flexible configuration.
 
-## Features
-
-- Single file upload to GCS
-- Multiple file uploads to GCS
-- Local disk upload (for testing)
-- File type validation (MIME type based)
-- File size limits (configurable)
-- Support for GCS service account authentication (JSON file or base64)
-- Application Default Credentials (ADC) support
-- Bucket accessibility check on startup
-- Public access URLs for uploaded files
-- Proper error handling and logging
-- Graceful shutdown for container platforms
-- Docker support
-- GitHub Actions CI/CD with Cloud Run deployment via Workload Identity Federation
-
-## Prerequisites
-
-- Node.js 18+ (tested with v24.13.1)
-- Google Cloud Storage bucket
-- Service account with Storage Object Admin permissions (or appropriate roles)
-- Google Cloud SDK (optional, for local development with ADC)
-
-## Installation
-
-1. Clone the repository and navigate to the project directory:
-
-```bash
-cd docker-gcp
-```
-
-2. Install dependencies:
-
-```bash
-npm install
-```
-
-3. Configure environment variables:
-
-```bash
-cp .env.example .env
-```
-
-4. Edit `.env` with your GCS configuration.
-
 ## Configuration
 
 The application supports multiple authentication methods for GCS:
@@ -143,37 +98,6 @@ curl -X POST \
 curl -X DELETE http://localhost:3000/upload/1234567890-image.jpg
 ```
 
-## File Validation
-
-- **Max file size**: Default 50MB (configurable via `MAX_FILE_SIZE_BYTES`)
-- **Allowed MIME types**: Configurable via `ALLOWED_MIME_TYPES` (comma-separated, supports wildcards like `image/*`)
-- Default allowed: `image/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.*,text/plain`
-
-## Testing
-
-```bash
-npm test
-```
-
-## Code quality
-
-Formatting and linting are separate concerns:
-
-- **Prettier** owns formatting. Configuration lives in `.prettierrc.json`, so the
-  editor extension and CLI produce the same output.
-- **ESLint** checks correctness only. `eslint-config-prettier` disables all formatting
-  rules, so ESLint and Prettier never disagree.
-
-```bash
-npm run lint          # correctness checks
-npm run lint:fix      # auto-fix safe issues
-npm run format        # format the codebase
-npm run format:check  # verify formatting (used in CI)
-```
-
-The formatting rules are intentionally not lint errors. Semicolons, quotes, spacing,
-and line wrapping are handled by Prettier.
-
 ## Docker
 
 Build the image:
@@ -219,21 +143,10 @@ export REGION="us-central1"
 gcloud config set project "${PROJECT_ID}"
 
 gcloud services enable \
-  run.googleapis.com \
+  run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   iamcredentials.googleapis.com \
   storage.googleapis.com
-```
-
-### 2. Create the Artifact Registry repository
-
-```bash
-export REPO="docker-gcp"
-
-gcloud artifacts repositories create "${REPO}" \
-  --repository-format=docker \
-  --location="${REGION}" \
-  --description="Container images for the file upload service"
 ```
 
 ### 3. Create the runtime service account
@@ -298,7 +211,54 @@ gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA_EMAIL}" \
   --role="roles/iam.serviceAccountUser"
 ```
 
-### 5. Configure Workload Identity Federation for GitHub
+### 5. Deploy to Cloud Run
+
+```
+export CLOUD_RUN_SERVICE = "file-uploader"
+```
+
+METHOD 1: deploy from source (gcs)
+
+```bash
+## 1.
+gcloud storage buckets add-iam-policy-binding "gs://run-sources-${PROJECT_ID}-${REGION}" \
+  --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
+  --role="roles/storage.objectViewer"
+
+## 2. Allow cloud run build permission on SA. (we already added 'run.admin' so adding this is not necessary)
+gcloud iam service-accounts add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
+  --role="roles/run.builder"
+
+## 3. Deploy
+gcloud run deploy ${CLOUD_RUN_SERVICE} source . --region="${REGION}" \
+  --service-account="${RUNTIME_SA_EMAIL}" \
+  --build-service-account="projects/${PROJECT_ID}/serviceAccounts/${DEPLOYER_SA_EMAIL}" \
+  --set-env-vars "NODE_ENV=production,GCS_BUCKET_NAME=YOUR_BUCKET,GCS_PROJECT_ID=YOUR_PROJECT_ID" \
+  --allow-unauthenticated --min-instances=0 --max-instances=10 --memory=512Mi
+```
+
+METHOD 2 (Alternative): deploy from build/push container image
+
+```bash
+export REPO="cloud-run-container-deploy"
+
+gcloud artifacts repositories create "${REPO}" \
+  --repository-format=docker \
+  --location="${REGION}" \
+  --description="Container images for the file upload service"
+
+gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+
+docker build -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}$:latest" .
+docker push "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest"
+
+gcloud run deploy "${CLOUD_RUN_SERVICE}" --image "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest" \
+  --region "${REGION}" --service-account "${RUNTIME_SA_EMAIL}" \
+  --set-env-vars "NODE_ENV=production,GCS_BUCKET_NAME=YOUR_BUCKET"
+```
+
+### 6. Configure Workload Identity Federation for GitHub
 
 ```bash
 export GITHUB_ORG="your-github-org"
@@ -334,7 +294,7 @@ gcloud iam workload-identity-pools providers describe "${PROVIDER}" \
   --format='value(name)'
 ```
 
-### 6. Configure GitHub repository secrets and variables
+### 7. Configure GitHub repository secrets and variables
 
 Create these **secrets** (`Settings → Secrets and variables → Actions → Secrets`):
 
@@ -364,15 +324,6 @@ Create these **variables** (`Settings → Secrets and variables → Actions → 
 | `CLOUD_RUN_MAX_INSTANCES`   | No       | Override max instances; unset preserves the existing setting                                             |
 | `CLOUD_RUN_TIMEOUT`         | No       | Override request timeout in seconds; unset preserves the existing setting                                |
 | `CLOUD_RUN_PORT`            | No       | Override container port; unset preserves the existing setting                                            |
-
-### 7. Deploy
-
-Push to `main` (or run the **Deploy to Cloud Run** workflow manually). The workflow
-will run tests, build and push the image, deploy the service, and print the service URL
-in the job summary.
-
-The deployment passes configuration to Cloud Run as environment variables, so no
-secrets or credentials are baked into the image.
 
 ### 8. Existing Cloud Run deployments
 
