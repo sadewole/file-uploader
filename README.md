@@ -214,10 +214,10 @@ gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA_EMAIL}" \
 ### 5. Deploy to Cloud Run
 
 ```
-export CLOUD_RUN_SERVICE = "file-uploader"
+export CLOUD_RUN_SERVICE="file-uploader"
 ```
 
-METHOD 1: deploy from source (gcs)
+METHOD 1: deploy from source (GCS)
 
 ```bash
 ## 1.
@@ -226,12 +226,12 @@ gcloud storage buckets add-iam-policy-binding "gs://run-sources-${PROJECT_ID}-${
   --role="roles/storage.objectViewer"
 
 ## 2. Allow cloud run build permission on SA. (we already added 'run.admin' so adding this is not necessary)
-gcloud iam service-accounts add-iam-policy-binding "${PROJECT_ID}" \
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
   --role="roles/run.builder"
 
 ## 3. Deploy
-gcloud run deploy ${CLOUD_RUN_SERVICE} source . --region="${REGION}" \
+gcloud run deploy ${CLOUD_RUN_SERVICE} --source . --region="${REGION}" \
   --service-account="${RUNTIME_SA_EMAIL}" \
   --build-service-account="projects/${PROJECT_ID}/serviceAccounts/${DEPLOYER_SA_EMAIL}" \
   --set-env-vars "NODE_ENV=production,GCS_BUCKET_NAME=YOUR_BUCKET,GCS_PROJECT_ID=YOUR_PROJECT_ID" \
@@ -250,7 +250,7 @@ gcloud artifacts repositories create "${REPO}" \
 
 gcloud auth configure-docker "${REGION}-docker.pkg.dev"
 
-docker build -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}$:latest" .
+docker build -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest" .
 docker push "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest"
 
 gcloud run deploy "${CLOUD_RUN_SERVICE}" --image "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest" \
