@@ -19,6 +19,15 @@ function decodeServiceAccount() {
   return null;
 }
 
+function parseInteger(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizePrefix(value) {
+  return value.replace(/^\/+|\/+$/g, '');
+}
+
 const serviceAccount = decodeServiceAccount();
 
 let credentials = null;
@@ -36,9 +45,23 @@ if (serviceAccount) {
   }
 }
 
+const authMode = process.env.AUTH_MODE || 'none';
+if (!['none', 'api-key'].includes(authMode)) {
+  throw new Error(`Invalid AUTH_MODE "${authMode}". Use "none" or "api-key".`);
+}
+
+const apiKeys = (process.env.API_KEYS || '')
+  .split(',')
+  .map((key) => key.trim())
+  .filter(Boolean);
+
+if (authMode === 'api-key' && apiKeys.length === 0) {
+  throw new Error('AUTH_MODE=api-key requires API_KEYS to be set.');
+}
+
 export const config = {
   server: {
-    port: parseInt(process.env.PORT, 10) || 3000,
+    port: parseInteger(process.env.PORT, 3000),
     host: process.env.HOST || '0.0.0.0',
     env: process.env.NODE_ENV || 'development',
   },
@@ -49,15 +72,48 @@ export const config = {
     keyFilename: credentials ? undefined : process.env.GOOGLE_APPLICATION_CREDENTIALS,
   },
   upload: {
-    maxFileSizeBytes: parseInt(process.env.MAX_FILE_SIZE_BYTES, 10) || 52428800,
-    maxFiles: parseInt(process.env.MAX_FILES, 10) || 10,
+    maxFileSizeBytes: parseInteger(process.env.MAX_FILE_SIZE_BYTES, 52428800),
+    maxSignedFileSizeBytes: parseInteger(process.env.MAX_SIGNED_UPLOAD_BYTES, 1073741824),
+    maxFiles: parseInteger(process.env.MAX_FILES, 10),
     allowedMimeTypes: (process.env.ALLOWED_MIME_TYPES || 'image/*,application/pdf,text/plain')
       .split(',')
-      .map((t) => t.trim()),
+      .map((type) => type.trim())
+      .filter(Boolean),
     uploadDir: process.env.UPLOAD_DIR || './uploads',
+    prefix: normalizePrefix(process.env.UPLOAD_PREFIX || 'uploads'),
+    quarantinePrefix: normalizePrefix(process.env.QUARANTINE_PREFIX || 'quarantine'),
+    strictTypeCheck: process.env.STRICT_TYPE_CHECK !== 'false',
+  },
+  auth: {
+    mode: authMode,
+    keys: apiKeys,
+  },
+  cors: {
+    origins: (process.env.CORS_ORIGINS || '')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+  },
+  rateLimit: {
+    max: parseInteger(process.env.RATE_LIMIT_MAX, 100),
+    windowMs: parseInteger(process.env.RATE_LIMIT_WINDOW_MS, 60000),
+    uploadMax: parseInteger(process.env.RATE_LIMIT_UPLOAD_MAX, 20),
+  },
+  signedUrl: {
+    expiresSeconds: parseInteger(process.env.SIGNED_URL_EXPIRES_SECONDS, 900),
   },
 };
 
 if (!config.gcs.bucketName) {
   console.warn('Warning: GCS_BUCKET_NAME is not set. File uploads will fail until configured.');
+}
+
+if (config.auth.mode === 'none') {
+  console.warn('Warning: AUTH_MODE is "none"; the upload API is unauthenticated.');
+}
+
+if (config.upload.maxFileSizeBytes > 30 * 1024 * 1024) {
+  console.warn(
+    'Warning: MAX_FILE_SIZE_BYTES exceeds 30 MiB. Server-side uploads will be rejected by Cloud Run, which limits HTTP requests to ~32 MiB. Use signed upload URLs for larger files.',
+  );
 }

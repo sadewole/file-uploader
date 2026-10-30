@@ -1,0 +1,14 @@
+[
+  {
+    "origin": ["https://your-frontend.example.com"],
+    "method": ["PUT", "GET", "HEAD", "OPTIONS"],
+    "responseHeader": [
+      "Content-Type",
+      "Content-Length",
+      "x-goog-content-length-range",
+      "x-goog-hash",
+      "ETag"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

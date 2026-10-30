@@ -2,6 +2,17 @@
 
 A comprehensive Fastify application for uploading files to Google Cloud Storage (GCS) with support for multiple upload methods, validation, and flexible configuration.
 
+## Features
+
+- Server-side multipart uploads (single and multiple files)
+- Direct-to-GCS signed uploads with a quarantine + verification step
+- Signed download URLs for private objects
+- Magic-byte content validation (not just the client-provided `Content-Type`)
+- Filename sanitization, UUID object names, and SHA-256/CRC checksums
+- Optional API-key authentication and per-IP rate limiting
+- CORS support for browser clients
+- Cloud Run deployment via GitHub Actions and Workload Identity Federation
+
 ## Configuration
 
 The application supports multiple authentication methods for GCS:
@@ -24,12 +35,39 @@ GCS_BUCKET_NAME=your-bucket-name
 
 Leave the credential variables empty and ensure ADC is configured. This is automatic in GCP environments.
 
+### Application environment variables
+
+| Variable                     | Default                              | Description                                                               |
+| ---------------------------- | ------------------------------------ | ------------------------------------------------------------------------- |
+| `PORT`                       | `3000` (`8080` in the container)     | HTTP port                                                                 |
+| `HOST`                       | `0.0.0.0`                            | Bind address                                                              |
+| `NODE_ENV`                   | `development`                        | `production` disables `/upload/disk`                                      |
+| `GCS_BUCKET_NAME`            | —                                    | Bucket for uploads (required)                                             |
+| `GCS_PROJECT_ID`             | from credentials                     | Google Cloud project                                                      |
+| `MAX_FILE_SIZE_BYTES`        | `52428800` (50 MiB)                  | Server-side multipart limit; Cloud Run caps requests at ~32 MiB           |
+| `MAX_SIGNED_UPLOAD_BYTES`    | `1073741824` (1 GiB)                 | Maximum size for a direct signed upload                                   |
+| `MAX_FILES`                  | `10`                                 | Maximum files in `/upload/multiple`                                       |
+| `ALLOWED_MIME_TYPES`         | `image/*,application/pdf,text/plain` | Comma-separated MIME types/patterns; wildcards like `image/*` are allowed |
+| `UPLOAD_DIR`                 | `./uploads`                          | Local directory for `/upload/disk`                                        |
+| `UPLOAD_PREFIX`              | `uploads`                            | GCS prefix for managed objects                                            |
+| `QUARANTINE_PREFIX`          | `quarantine`                         | GCS prefix for direct-upload staging                                      |
+| `STRICT_TYPE_CHECK`          | `true`                               | Set `false` to skip magic-byte validation                                 |
+| `AUTH_MODE`                  | `none`                               | `none` or `api-key`                                                       |
+| `API_KEYS`                   | —                                    | Comma-separated API keys; required when `AUTH_MODE=api-key`               |
+| `CORS_ORIGINS`               | —                                    | Comma-separated browser origins; empty disables CORS                      |
+| `RATE_LIMIT_MAX`             | `100`                                | Global requests per window, per instance                                  |
+| `RATE_LIMIT_WINDOW_MS`       | `60000`                              | Rate-limit window in milliseconds                                         |
+| `RATE_LIMIT_UPLOAD_MAX`      | `20`                                 | Upload-route requests per window, per instance                            |
+| `SIGNED_URL_EXPIRES_SECONDS` | `900`                                | Signed upload/download URL lifetime                                       |
+
 ## Google Cloud Setup
 
 1. Create a GCS bucket in your Google Cloud project
 2. Create a service account with the role "Storage Object Admin" (or minimal required permissions)
 3. Download the service account JSON key file and place it in the project root as `service-account-key.json`
-4. Ensure the bucket allows public access if you want public URLs (or configure IAM permissions)
+4. Keep the bucket private. Downloads use signed URLs, which require the service account to
+   have `roles/iam.serviceAccountTokenCreator` on itself so it can sign URLs with
+   `signBlob`. Public bucket access is not required.
 
 ## Usage
 
@@ -49,13 +87,20 @@ npm start
 
 ### API Endpoints
 
-| Method | Endpoint            | Description                    | Content-Type        |
-| ------ | ------------------- | ------------------------------ | ------------------- |
-| GET    | `/health`           | Health check                   | application/json    |
-| POST   | `/upload`           | Upload single file to GCS      | multipart/form-data |
-| POST   | `/upload/multiple`  | Upload multiple files to GCS   | multipart/form-data |
-| POST   | `/upload/disk`      | Upload to local disk (testing) | multipart/form-data |
-| DELETE | `/upload/:filename` | Delete file from GCS           | application/json    |
+| Method | Endpoint             | Description                                      | Content-Type        |
+| ------ | -------------------- | ------------------------------------------------ | ------------------- |
+| GET    | `/health`            | Health check (always public)                     | application/json    |
+| POST   | `/upload`            | Upload one file to GCS through the server        | multipart/form-data |
+| POST   | `/upload/multiple`   | Upload multiple files to GCS through the server  | multipart/form-data |
+| POST   | `/upload/disk`       | Save to local disk (development only)            | multipart/form-data |
+| POST   | `/upload/signed-url` | Create a signed GCS URL for a quarantine upload  | application/json    |
+| POST   | `/upload/verify`     | Validate a quarantine upload and promote it      | application/json    |
+| GET    | `/upload/signed-url` | Create a signed download URL for a stored object | application/json    |
+| DELETE | `/upload/*`          | Delete a managed object from GCS                 | application/json    |
+
+Object keys are generated by the server (`uploads/<yyyy>/<mm>/<uuid>.<ext>` by default) and
+quarantine uploads use `quarantine/<uuid>.<ext>`. Client-provided filenames are only kept
+as metadata (`originalName`) and in the `Content-Disposition` header.
 
 ### Example: Single File Upload
 
@@ -73,13 +118,13 @@ Response:
 {
   "success": true,
   "message": "File uploaded successfully",
-  "fileName": "1234567890-image.jpg",
+  "fileName": "uploads/2026/10/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.jpg",
   "bucket": "your-bucket-name",
-  "url": "https://storage.googleapis.com/your-bucket-name/1234567890-image.jpg",
-  "publicUrl": "https://storage.googleapis.com/your-bucket-name/1234567890-image.jpg",
-  "gcsUri": "gs://your-bucket-name/1234567890-image.jpg",
-  "size": "12345",
-  "contentType": "image/jpeg"
+  "gcsUri": "gs://your-bucket-name/uploads/2026/10/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.jpg",
+  "size": 12345,
+  "contentType": "image/jpeg",
+  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "originalName": "image.jpg"
 }
 ```
 
@@ -94,9 +139,181 @@ curl -X POST \
 
 ### Example: Delete File
 
+The delete route accepts the full managed object key. Keys outside the configured upload
+prefix are rejected, so it cannot be used to delete arbitrary bucket objects.
+
 ```bash
-curl -X DELETE http://localhost:3000/upload/1234567890-image.jpg
+curl -X DELETE \
+  "http://localhost:3000/upload/uploads/2026/10/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.jpg"
 ```
+
+### Authentication
+
+Authentication is disabled by default (`AUTH_MODE=none`). To require an API key:
+
+```bash
+AUTH_MODE=api-key
+API_KEYS=key-one,key-two
+```
+
+When enabled, the service fails to start if `API_KEYS` is empty. Send the key with either
+header:
+
+```bash
+curl -H "x-api-key: ${API_KEY}" ...
+curl -H "Authorization: Bearer ${API_KEY}" ...
+```
+
+`GET /health` is always public so Cloud Run health checks keep working. All other routes,
+including signed URL creation, verification, and deletion, require a key. The signed GCS
+URLs themselves are bearer capabilities and do not require the API key.
+
+For Cloud Run, store the keys in Secret Manager rather than in plain environment
+variables:
+
+```bash
+printf '%s' "${API_KEYS}" | gcloud secrets create file-upload-api-keys --data-file=-
+
+gcloud secrets add-iam-policy-binding file-upload-api-keys \
+  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud run services update "${CLOUD_RUN_SERVICE}" \
+  --region="${REGION}" \
+  --update-env-vars="AUTH_MODE=api-key" \
+  --update-secrets="API_KEYS=file-upload-api-keys:latest"
+```
+
+The deploy workflow uses `--update-env-vars`, which preserves existing variables and
+secret bindings, so this only needs to be configured once.
+
+### Rate limiting
+
+Rate limiting is enabled per Cloud Run instance and keyed by the client IP
+(`trustProxy` is on so `X-Forwarded-For` from the Google front end is used). Upload routes
+have a stricter limit than the rest of the API.
+
+```bash
+RATE_LIMIT_MAX=100
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_UPLOAD_MAX=20
+```
+
+`RATE_LIMIT_WINDOW_MS` applies to both the global and upload-route limits.
+Limits are per instance, not global. With multiple Cloud Run instances the effective
+limit is `instances × limit`. For a global limit, use Memorystore/Redis as the rate-limit
+store.
+
+### Direct uploads with signed URLs
+
+Cloud Run rejects HTTP requests larger than about 32 MiB. For larger files, upload
+directly to GCS with a signed URL, then ask the service to verify the object before it is
+promoted into the managed upload prefix.
+
+1. Create a signed upload URL:
+
+```bash
+curl -X POST "https://your-service.run.app/upload/signed-url" \
+  -H "x-api-key: ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"video.mp4","contentType":"video/mp4"}'
+```
+
+```json
+{
+  "success": true,
+  "fileName": "quarantine/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.mp4",
+  "originalName": "video.mp4",
+  "contentType": "video/mp4",
+  "maxSize": 1073741824,
+  "method": "PUT",
+  "uploadUrl": "https://storage.googleapis.com/...",
+  "headers": {
+    "Content-Type": "video/mp4",
+    "x-goog-content-length-range": "0,1073741824"
+  },
+  "expiresAt": "2026-10-23T12:30:00.000Z",
+  "verify": {
+    "method": "POST",
+    "path": "/upload/verify",
+    "body": {
+      "key": "quarantine/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.mp4",
+      "filename": "video.mp4"
+    }
+  }
+}
+```
+
+2. Upload the file directly to GCS with the returned URL and headers:
+
+```bash
+curl -X PUT "${UPLOAD_URL}" \
+  -H "Content-Type: video/mp4" \
+  -H "x-goog-content-length-range: 0,1073741824" \
+  --data-binary @video.mp4
+```
+
+The `x-goog-content-length-range` header is enforced by GCS; the client must send the same
+value that the API returned.
+
+3. Verify and promote the object:
+
+```bash
+curl -X POST "https://your-service.run.app/upload/verify" \
+  -H "x-api-key: ${API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"quarantine/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.mp4","filename":"video.mp4"}'
+```
+
+Verification reads the first bytes of the object, checks the detected type against the
+allowlist, checks the size, copies the object to
+`uploads/<yyyy>/<mm>/<uuid>.<ext>`, copies the checksum metadata, and deletes the
+quarantine object. Invalid objects are deleted. Abandoned quarantine uploads are removed
+by the GCS lifecycle rule described below.
+
+4. Create a signed download URL for a managed object:
+
+```bash
+curl "https://your-service.run.app/upload/signed-url?key=uploads/2026/10/6f1c2b9e-2a4d-4f0e-9a7c-1b2c3d4e5f60.mp4" \
+  -H "x-api-key: ${API_KEY}"
+```
+
+Signed URLs require the runtime service account to have
+`roles/iam.serviceAccountTokenCreator` on itself so it can call `signBlob`:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA_EMAIL}" \
+  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role="roles/iam.serviceAccountTokenCreator"
+```
+
+For browser uploads, configure CORS on the bucket (edit the origin first):
+
+```bash
+gcloud storage buckets update "gs://${BUCKET_NAME}" \
+  --cors-file=docs/gcs-cors.json
+```
+
+Add a lifecycle rule to clean up abandoned quarantine objects after one day:
+
+```bash
+gcloud storage buckets update "gs://${BUCKET_NAME}" \
+  --lifecycle-file=docs/gcs-lifecycle.json
+```
+
+### Upload validation and hardening
+
+- Uploads are validated by magic bytes with `file-type`, not only by the declared
+  `Content-Type`. A detected type must be in `ALLOWED_MIME_TYPES` and must match the
+  declared type, unless the client sends `application/octet-stream`.
+- Text-like formats that cannot be detected (`text/*`, JSON, XML, CSV, NDJSON) are allowed
+  when they are in the allowlist. Other undetectable binary content is rejected with 415.
+- Filenames are sanitized for use in `Content-Disposition`. Object keys are generated from
+  UUIDs; the original name is stored as metadata only.
+- Streamed uploads compute SHA-256, and GCS also stores `md5Hash`/`crc32c`. Failed uploads
+  delete the partial object.
+- Set `STRICT_TYPE_CHECK=false` only if you intentionally need to skip magic-byte
+  validation.
 
 ## Docker
 
@@ -146,6 +363,7 @@ gcloud services enable \
   run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   iamcredentials.googleapis.com \
+  secretmanager.googleapis.com \
   storage.googleapis.com
 ```
 
@@ -175,6 +393,11 @@ gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
 gcloud storage buckets add-iam-policy-binding "gs://${BUCKET_NAME}" \
   --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
   --role="roles/storage.bucketViewer"
+
+# Required for V4 signed URL generation (signBlob) when running without a key file
+gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA_EMAIL}" \
+  --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+  --role="roles/iam.serviceAccountTokenCreator"
 
 # Allow Cloud Run to pull the image from Artifact Registry
 gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
@@ -213,25 +436,25 @@ gcloud iam service-accounts add-iam-policy-binding "${RUNTIME_SA_EMAIL}" \
 
 ### 5. Deploy to Cloud Run
 
-```
-export CLOUD_RUN_SERVICE = "file-uploader"
+```bash
+export CLOUD_RUN_SERVICE="file-uploader"
 ```
 
-METHOD 1: deploy from source (gcs)
+METHOD 1: deploy from source (GCS)
 
 ```bash
-## 1.
+## 1. Allow the deployer to read Cloud Run source uploads
 gcloud storage buckets add-iam-policy-binding "gs://run-sources-${PROJECT_ID}-${REGION}" \
   --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
   --role="roles/storage.objectViewer"
 
-## 2. Allow cloud run build permission on SA. (we already added 'run.admin' so adding this is not necessary)
-gcloud iam service-accounts add-iam-policy-binding "${PROJECT_ID}" \
+## 2. Allow Cloud Run builds (run.admin already covers this)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --member="serviceAccount:${DEPLOYER_SA_EMAIL}" \
   --role="roles/run.builder"
 
 ## 3. Deploy
-gcloud run deploy ${CLOUD_RUN_SERVICE} source . --region="${REGION}" \
+gcloud run deploy "${CLOUD_RUN_SERVICE}" --source . --region="${REGION}" \
   --service-account="${RUNTIME_SA_EMAIL}" \
   --build-service-account="projects/${PROJECT_ID}/serviceAccounts/${DEPLOYER_SA_EMAIL}" \
   --set-env-vars "NODE_ENV=production,GCS_BUCKET_NAME=YOUR_BUCKET,GCS_PROJECT_ID=YOUR_PROJECT_ID" \
@@ -250,7 +473,7 @@ gcloud artifacts repositories create "${REPO}" \
 
 gcloud auth configure-docker "${REGION}-docker.pkg.dev"
 
-docker build -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}$:latest" .
+docker build -t "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest" .
 docker push "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest"
 
 gcloud run deploy "${CLOUD_RUN_SERVICE}" --image "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${CLOUD_RUN_SERVICE}:latest" \
@@ -350,11 +573,10 @@ a parallel service or registry. To reuse what you already have:
 - Disable any other pipeline (for example an existing Cloud Build trigger) that deploys
   the same service, otherwise the two pipelines will race.
 
-> **Note:** The application currently stores uploaded objects as private GCS objects.
-> The returned `url` is a standard Cloud Storage URL and requires authentication unless
-> you grant public access on the bucket/objects. For public downloads, either grant
-> `roles/storage.objectViewer` to `allUsers` at the bucket level (only if your
-> organization policy allows it) or switch the service to generate signed URLs.
+> **Note:** Objects are stored as private GCS objects. Generate a short-lived signed
+> download URL with `GET /upload/signed-url` instead of making the bucket public. The
+> runtime service account needs `roles/iam.serviceAccountTokenCreator` on itself (see
+> step 3) for signing to work on Cloud Run.
 
 ### Manual deploy
 
